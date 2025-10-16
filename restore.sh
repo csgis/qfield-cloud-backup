@@ -1,18 +1,21 @@
 #!/bin/bash
 # QFieldCloud Restore Script - Disaster Recovery Edition
-# Version: 3.0 - General Refactoring & Pre-Init Logic
-# Stoppt sofort bei Fehlern
+# Version: 3.1 - English & Sibling Directory Support
+# Stops immediately on errors
 set -e
 
 # =============================================================================
-# KONFIGURATION
+# CONFIGURATION
 # =============================================================================
-# GeoDB Wiederherstellung aktivieren? (true/false)
-# Standard: false (GeoDB wurde in neueren Versionen entfernt)
+# Enable GeoDB restoration? (true/false)
+# Default: false (GeoDB was removed in newer versions)
 RESTORE_GEODB=${RESTORE_GEODB:-false}
 
+# QFieldCloud installation directory (sibling directory)
+QFIELD_DIR="../QFieldCloud"
+
 # =============================================================================
-# HILFS-FUNKTIONEN
+# HELPER FUNCTIONS
 # =============================================================================
 print_header() {
     echo ""
@@ -29,11 +32,11 @@ print_step() {
 }
 
 print_error() {
-    echo "❌ FEHLER: $1" >&2
-    echo "Restore abgebrochen." >&2
-    # Entferne temporäres Backup-Verzeichnis bei Fehler
+    echo "❌ ERROR: $1" >&2
+    echo "Restore aborted." >&2
+    # Remove temporary backup directory on error
     if [ -n "$TEMP_BACKUP_DIR" ] && [ -d "$TEMP_BACKUP_DIR" ]; then
-        log "Räume temporäres Backup-Verzeichnis bei Fehler auf..."
+        log "Cleaning up temporary backup directory on error..."
         rm -rf "$TEMP_BACKUP_DIR" 2>/dev/null || true
     fi
     exit 1
@@ -45,367 +48,394 @@ log() {
 
 check_command() {
     if ! command -v "$1" > /dev/null 2>&1; then
-        print_error "$1 ist nicht installiert! Bitte installieren: $2"
+        print_error "$1 is not installed! Please install: $2"
     fi
 }
 
 # =============================================================================
-# INTRO & SYSTEM-CHECKS
+# INTRO & SYSTEM CHECKS
 # =============================================================================
 print_header "QFieldCloud Disaster Recovery & Restore Script"
 
 RESTORE_LOG="restore_$(date +%Y-%m-%d_%H-%M-%S).log"
-log "=== QFieldCloud Wiederherstellung gestartet ==="
+log "=== QFieldCloud restoration started ==="
 
-echo "Dieses Skript führt die Wiederherstellung aus einem Backup durch."
-echo "Es ist konzipiert für einen *neuen Server* nach vorherigem Code-Checkout und Initialisierung."
+echo "This script performs restoration from a backup."
+echo "It is designed for a *new server* after previous code checkout and initialization."
 echo ""
-echo "Konfiguration:"
-echo "  GeoDB Wiederherstellung: $RESTORE_GEODB"
-echo "  Restore-Log: $RESTORE_LOG"
+echo "Configuration:"
+echo "  GeoDB restoration: $RESTORE_GEODB"
+echo "  QFieldCloud directory: $QFIELD_DIR"
+echo "  Restore log: $RESTORE_LOG"
 echo ""
 
-# Prüfe Root-Rechte für kritische Operationen
+# Check root permissions for critical operations
 if [ "$EUID" -ne 0 ]; then
-    print_error "Dieses Skript MUSS mit 'sudo' ausgeführt werden, da es Docker-Volumes manipuliert. Bitte erneut starten mit: sudo $0"
+    print_error "This script MUST be run with 'sudo' as it manipulates Docker volumes. Please restart with: sudo $0"
 fi
-echo "✓ Root-Rechte erkannt (erforderlich für Volume-Operationen)"
+echo "✓ Root privileges detected (required for volume operations)"
 
-# Prüfe Docker
-print_step "SCHRITT 1: System-Voraussetzungen prüfen"
+# Check Docker
+print_step "STEP 1: Checking system prerequisites"
 check_command "docker" "sudo apt install docker.io"
-echo "✓ Docker gefunden: $(docker --version | head -n1)"
+echo "✓ Docker found: $(docker --version | head -n1)"
 
 if ! docker compose version > /dev/null 2>&1; then
-    print_error "Docker Compose Plugin nicht verfügbar! Installation: sudo apt install docker-compose-plugin"
+    print_error "Docker Compose plugin not available! Install with: sudo apt install docker-compose-plugin"
 fi
-echo "✓ Docker Compose gefunden: $(docker compose version | head -n1)"
+echo "✓ Docker Compose found: $(docker compose version | head -n1)"
 
-# Optionale Tools
+# Optional tools
 GIT_AVAILABLE=false
 RSYNC_AVAILABLE=false
 
 if command -v git > /dev/null 2>&1; then
     GIT_AVAILABLE=true
-    echo "✓ Git gefunden: $(git --version | head -n1)"
+    echo "✓ Git found: $(git --version | head -n1)"
 fi
 
 if command -v rsync > /dev/null 2>&1; then
     RSYNC_AVAILABLE=true
-    echo "✓ rsync gefunden: $(rsync --version | head -n1)"
+    echo "✓ rsync found: $(rsync --version | head -n1)"
 fi
 
 # =============================================================================
-# BACKUP-QUELLE BESTIMMEN
+# DETERMINE BACKUP SOURCE
 # =============================================================================
-print_step "SCHRITT 2: Backup-Quelle festlegen"
+print_step "STEP 2: Determining backup source"
 
-echo "Wo befindet sich Ihr Backup?"
-echo "  1) Lokal auf diesem Server (Pfad angeben)"
-echo "  2) Auf einem Remote-Server (via rsync herunterladen)"
+echo "Where is your backup located?"
+echo "  1) Locally on this server (specify path)"
+echo "  2) On a remote server (download via rsync)"
 echo ""
-read -r -p "Ihre Wahl (1/2): " BACKUP_SOURCE_TYPE
+read -r -p "Your choice (1/2): " BACKUP_SOURCE_TYPE
 
 BACKUP_DIR=""
 TEMP_BACKUP_DIR="/tmp/qfieldcloud_restore_$(date +%s)"
 
 if [ "$BACKUP_SOURCE_TYPE" = "2" ]; then
-    # Remote Backup
+    # Remote backup
     if [ "$RSYNC_AVAILABLE" = false ]; then
-        print_error "rsync wird benötigt für Remote-Backup-Transfer! Installation: sudo apt install rsync"
+        print_error "rsync is required for remote backup transfer! Install with: sudo apt install rsync"
     fi
     
     echo ""
-    echo "=== Remote Backup-Transfer ==="
+    echo "=== Remote Backup Transfer ==="
     echo ""
-    read -r -p "Remote Server (user@host): " REMOTE_HOST
-    read -r -p "Remote Backup-Pfad: " REMOTE_BACKUP_PATH
+    read -r -p "Remote server (user@host): " REMOTE_HOST
+    read -r -p "Remote backup path: " REMOTE_BACKUP_PATH
     
     echo ""
-    echo "Übertrage Backup nach $TEMP_BACKUP_DIR ..."
-    mkdir -p "$TEMP_BACKUP_DIR" || print_error "Konnte temporäres Verzeichnis nicht erstellen"
+    echo "Transferring backup to $TEMP_BACKUP_DIR ..."
+    mkdir -p "$TEMP_BACKUP_DIR" || print_error "Could not create temporary directory"
     
-    if ! rsync -avz --progress "${REMOTE_HOST}:${REMOTE_BACKUP_PATH}/" "$TEMP_BACKUP_DIR/"; then
-        print_error "rsync fehlgeschlagen! Überprüfen Sie Pfad und SSH-Zugriff."
+    # Use rsync with exclusions for certificates that can't be read due to permissions
+    if ! rsync -avz --progress \
+        --exclude="*/certbot/conf/archive/*" \
+        --exclude="*/certbot/conf/live/*" \
+        --exclude="*/certbot/conf/accounts/*" \
+        --exclude="*/nginx_certs/*" \
+        "${REMOTE_HOST}:${REMOTE_BACKUP_PATH}/" "$TEMP_BACKUP_DIR/"; then
+        print_error "rsync failed! Check path and SSH access."
     fi
     
     BACKUP_DIR="$TEMP_BACKUP_DIR"
-    echo "✓ Backup erfolgreich übertragen"
+    echo "✓ Backup successfully transferred (certificates excluded)"
     
 else
-    # Lokales Backup
+    # Local backup
     echo ""
-    read -r -p "Lokaler Backup-Pfad: " LOCAL_BACKUP_PATH
+    read -r -p "Local backup path: " LOCAL_BACKUP_PATH
     
     if [ ! -d "$LOCAL_BACKUP_PATH" ]; then
-        print_error "Backup-Verzeichnis existiert nicht: $LOCAL_BACKUP_PATH"
+        print_error "Backup directory does not exist: $LOCAL_BACKUP_PATH"
     fi
     
     BACKUP_DIR=$(realpath "$LOCAL_BACKUP_PATH")
-    echo "✓ Lokales Backup gefunden"
+    echo "✓ Local backup found"
 fi
 
-log "Backup-Quelle: $BACKUP_DIR"
+log "Backup source: $BACKUP_DIR"
 
 # =============================================================================
-# BACKUP-INFORMATIONEN & CODE-PRÜFUNG
+# BACKUP INFORMATION & CODE CHECK
 # =============================================================================
-print_step "SCHRITT 3: Backup-Informationen auslesen"
+print_step "STEP 3: Reading backup information"
 
-echo "Backup-Quelle: $BACKUP_DIR"
-echo "Backup-Name: $(basename "$BACKUP_DIR")"
+echo "Backup source: $BACKUP_DIR"
+echo "Backup name: $(basename "$BACKUP_DIR")"
 echo ""
 
 GEODB_IN_BACKUP=false
 if [ -f "${BACKUP_DIR}/geodb_dump.sqlc" ] || [ -d "${BACKUP_DIR}/db_volumes/geodb_data" ]; then
     GEODB_IN_BACKUP=true
-    log "ℹ GeoDB-Daten im Backup gefunden"
+    log "ℹ GeoDB data found in backup"
     if [ "$RESTORE_GEODB" = false ]; then
-        echo "ℹ GeoDB wird NICHT wiederhergestellt (RESTORE_GEODB=false)"
+        echo "ℹ GeoDB will NOT be restored (RESTORE_GEODB=false)"
     else
-        echo "ℹ GeoDB WIRD wiederhergestellt (RESTORE_GEODB=true)"
+        echo "ℹ GeoDB WILL be restored (RESTORE_GEODB=true)"
     fi
 fi
 
-# Extrahiere Git Commit Info
+# Extract Git commit info
 BACKUP_COMMIT=""
 BACKUP_REMOTE=""
 if [ -f "${BACKUP_DIR}/backup.log" ]; then
-    log "Lese Git-Informationen aus backup.log..."
+    log "Reading Git information from backup.log..."
     BACKUP_COMMIT=$(sed -n '/GIT COMMIT INFORMATION/,/^$/p' "${BACKUP_DIR}/backup.log" | grep "^commit" | awk '{print $2}' | head -n1)
     BACKUP_REMOTE=$(sed -n '/GIT REMOTE INFORMATION/,/^$/p' "${BACKUP_DIR}/backup.log" | grep "origin" | awk '{print $2}' | head -n1)
 fi
 
 if [ -n "$BACKUP_COMMIT" ]; then
-    echo "Backup wurde mit Git Commit erstellt: $BACKUP_COMMIT"
+    echo "Backup was created with Git commit: $BACKUP_COMMIT"
 else
-    echo "WARNUNG: Kein Git Commit im Backup-Log gefunden - Kompatibilität unsicher!"
+    echo "WARNING: No Git commit found in backup log - compatibility uncertain!"
 fi
 
 # =============================================================================
-# CODE-PRÜFUNG & VORBEREITUNG (FÜR NEUE SERVER)
+# CODE CHECK & PREPARATION (FOR NEW SERVERS)
 # =============================================================================
-print_step "SCHRITT 4: QFieldCloud Code & Konfiguration prüfen"
+print_step "STEP 4: Checking QFieldCloud code & configuration"
 
-if [ ! -d ".git" ] || [ ! -f "docker-compose.yml" ] || [ ! -f ".env" ]; then
-    echo "🚨 VORBEREITUNG ERFORDERLICH 🚨"
-    echo "Das aktuelle Verzeichnis scheint keine vollständige QFieldCloud-Installation zu sein."
+# Check if QFieldCloud directory exists
+if [ ! -d "$QFIELD_DIR" ]; then
+    echo "🚨 PREPARATION REQUIRED 🚨"
+    echo "The QFieldCloud directory does not exist at: $QFIELD_DIR"
     echo ""
-    echo "Bitte FÜHREN SIE VORHER MANUELL FOLGENDE SCHRITTE DURCH:"
-    echo "1. **Code Klonen:**"
+    echo "Please MANUALLY PERFORM THE FOLLOWING STEPS FIRST:"
+    echo "1. **Clone code:**"
     if [ -n "$BACKUP_REMOTE" ]; then
-        echo "   -> git clone $BACKUP_REMOTE QFieldCloud-Restore"
+        echo "   -> git clone $BACKUP_REMOTE $(basename "$QFIELD_DIR")"
     else
-        echo "   -> git clone [REPO URL] QFieldCloud-Restore"
+        echo "   -> git clone [REPO URL] $(basename "$QFIELD_DIR")"
     fi
-    echo "   -> cd QFieldCloud-Restore"
-    echo "2. **Konfiguration wiederherstellen:**"
+    echo "   -> cd $(basename "$QFIELD_DIR")"
+    echo "2. **Restore configuration:**"
     echo "   -> cp ${BACKUP_DIR}/config/.env ."
     echo "   -> cp ${BACKUP_DIR}/config/*.yml ."
-    echo "3. **Code-Version anpassen (WICHTIG):**"
+    echo "3. **Adjust code version (IMPORTANT):**"
     if [ -n "$BACKUP_COMMIT" ]; then
         echo "   -> git fetch --all && git reset --hard $BACKUP_COMMIT"
     else
-        echo "   -> WARNUNG: Kein Backup-Commit gefunden, bitte die korrekte Version manuell auschecken."
+        echo "   -> WARNING: No backup commit found, please checkout the correct version manually."
     fi
-    echo "4. **Datenbanken initialisieren:**"
-    echo "   -> docker compose up -d db minio # Nur um Volumes/DB-Dateien anzulegen"
+    echo "4. **Initialize databases:**"
+    echo "   -> docker compose up -d db minio # Just to create volumes/DB files"
     echo "   -> docker compose down"
     echo ""
-    read -r -p "Haben Sie die oben genannten Schritte ausgeführt und sind im Code-Verzeichnis? (ja/nein): " CODE_MANUAL_READY
+    read -r -p "Have you performed the above steps? (yes/no): " CODE_MANUAL_READY
     
-    if [ "$CODE_MANUAL_READY" != "ja" ]; then
-        print_error "Abbruch. Bitte Code vorbereiten und erneut starten."
-    fi
-    
-    # Prüfe nach Bestätigung nochmals
-    if [ ! -f ".env" ]; then
-        print_error "Die .env-Datei fehlt weiterhin im aktuellen Verzeichnis."
+    if [ "$CODE_MANUAL_READY" != "yes" ]; then
+        print_error "Aborted. Please prepare code and restart."
     fi
 fi
 
-echo "✓ QFieldCloud-Code-Verzeichnis (.git, .env, docker-compose.yml) gefunden."
+# Change to QFieldCloud directory
+cd "$QFIELD_DIR" || print_error "Cannot change to QFieldCloud directory: $QFIELD_DIR"
+
+# Check for required files
+if [ ! -d ".git" ] || [ ! -f "docker-compose.yml" ] || [ ! -f ".env" ]; then
+    echo "🚨 INCOMPLETE INSTALLATION 🚨"
+    echo "The QFieldCloud directory seems to be incomplete."
+    echo ""
+    echo "Missing files:"
+    [ ! -d ".git" ] && echo "  - .git directory (no Git repository)"
+    [ ! -f "docker-compose.yml" ] && echo "  - docker-compose.yml"
+    [ ! -f ".env" ] && echo "  - .env"
+    echo ""
+    echo "Please ensure all files are present, especially:"
+    echo "  -> cp ${BACKUP_DIR}/config/.env ."
+    echo "  -> cp ${BACKUP_DIR}/config/*.yml ."
+    echo ""
+    read -r -p "Have you fixed the missing files? (yes/no): " FILES_FIXED
+    
+    if [ "$FILES_FIXED" != "yes" ] || [ ! -f ".env" ]; then
+        print_error "Required files still missing. Please fix and restart."
+    fi
+fi
+
+echo "✓ QFieldCloud code directory (.git, .env, docker-compose.yml) found."
 
 # =============================================================================
-# KONFIGURATIONSDATEIEN LADEN
+# LOAD CONFIGURATION FILES
 # =============================================================================
-print_step "SCHRITT 5: Konfiguration laden"
+print_step "STEP 5: Loading configuration"
 
-# Jetzt .env laden
+# Load .env
 source .env
-# Setze Standardwerte falls in .env nicht gesetzt
+# Set defaults if not set in .env
 export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml:docker-compose.override.standalone.yml}"
 COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)")}
 MINIO_INTERNAL_PORT="${MINIO_API_PORT:-9000}"
 
-echo "✓ .env geladen"
+echo "✓ .env loaded"
 echo "  COMPOSE_PROJECT_NAME: $COMPOSE_PROJECT_NAME"
 echo "  COMPOSE_FILE: $COMPOSE_FILE"
 
-# Prüfe ob GeoDB Service existiert (benutze temporäre Variablen für config output)
+# Check if GeoDB service exists (use temporary variables for config output)
 GEODB_SERVICE_EXISTS=false
 if COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" COMPOSE_FILE="$COMPOSE_FILE" docker compose config --services 2>/dev/null | grep -q "^geodb$"; then
     GEODB_SERVICE_EXISTS=true
-    echo "✓ GeoDB Service in docker-compose gefunden"
+    echo "✓ GeoDB service found in docker-compose"
 else
-    echo "ℹ GeoDB Service nicht in docker-compose gefunden"
+    echo "ℹ GeoDB service not found in docker-compose"
 fi
 
-# Finale GeoDB Entscheidung
+# Final GeoDB decision
 PROCESS_GEODB=false
 if [ "$RESTORE_GEODB" = true ] && [ "$GEODB_SERVICE_EXISTS" = true ] && [ "$GEODB_IN_BACKUP" = true ]; then
     PROCESS_GEODB=true
-    log "✓ GeoDB wird wiederhergestellt"
+    log "✓ GeoDB will be restored"
 elif [ "$RESTORE_GEODB" = true ]; then
-    log "⚠ GeoDB wird übersprungen, obwohl angefordert:"
-    [ "$GEODB_SERVICE_EXISTS" = false ] && log "  - Service nicht definiert"
-    [ "$GEODB_IN_BACKUP" = false ] && log "  - Keine Daten im Backup"
+    log "⚠ GeoDB will be skipped although requested:"
+    [ "$GEODB_SERVICE_EXISTS" = false ] && log "  - Service not defined"
+    [ "$GEODB_IN_BACKUP" = false ] && log "  - No data in backup"
 else
-    log "ℹ GeoDB wird übersprungen (RESTORE_GEODB=false)"
+    log "ℹ GeoDB will be skipped (RESTORE_GEODB=false)"
 fi
 
 # =============================================================================
-# FINALE BESTÄTIGUNG
+# FINAL CONFIRMATION
 # =============================================================================
-print_header "BEREIT FÜR RESTORE"
+print_header "READY FOR RESTORE"
 
-echo "Zusammenfassung:"
+echo "Summary:"
 echo "  • Backup: $(basename "$BACKUP_DIR")"
-echo "  • Arbeitsverzeichnis: $(pwd)"
-echo "  • Docker Projekt: $COMPOSE_PROJECT_NAME"
-echo "  • GeoDB wiederherstellen: $PROCESS_GEODB"
-[ -n "$BACKUP_COMMIT" ] && echo "  • Git Commit: $BACKUP_COMMIT"
+echo "  • Working directory: $(pwd)"
+echo "  • Docker project: $COMPOSE_PROJECT_NAME"
+echo "  • Restore GeoDB: $PROCESS_GEODB"
+[ -n "$BACKUP_COMMIT" ] && echo "  • Git commit: $BACKUP_COMMIT"
 echo ""
-echo "⚠️  WARNUNG: Der Restore wird alle **Docker Volumes** und **Datenbanken** dieses Projekts **ÜBERSCHREIBEN**."
+echo "⚠️  WARNING: The restore will OVERWRITE all **Docker volumes** and **databases** of this project."
 echo ""
 
-read -r -p "Zum Fortfahren tippen Sie 'RESTORE JETZT' ein: " FINAL_CONFIRMATION
+read -r -p "To continue, type 'RESTORE NOW': " FINAL_CONFIRMATION
 
-if [ "$FINAL_CONFIRMATION" != "RESTORE JETZT" ]; then
-    print_error "Restore abgebrochen durch Benutzer."
+if [ "$FINAL_CONFIRMATION" != "RESTORE NOW" ]; then
+    print_error "Restore cancelled by user."
 fi
 
-log "BESTÄTIGT. Führe Restore aus..."
+log "CONFIRMED. Performing restore..."
 
 # =============================================================================
-# BACKUP-VALIDIERUNG
+# BACKUP VALIDATION
 # =============================================================================
-print_step "SCHRITT 6: Backup validieren"
+print_step "STEP 6: Validating backup"
 
 DB_BACKUP_TYPE="unknown"
 MINIO_BACKUP_TYPE="unknown"
 
-# Datenbank-Backup-Typ
+# Database backup type
 if [ -d "${BACKUP_DIR}/db_volumes/postgres_data" ]; then
     DB_BACKUP_TYPE="volume"
-    log "Datenbank-Backup-Typ: Volume-basiert (cold backup)"
+    log "Database backup type: Volume-based (cold backup)"
 elif [ -f "${BACKUP_DIR}/db_dump.sqlc" ]; then
     DB_BACKUP_TYPE="dump"
-    log "Datenbank-Backup-Typ: pg_dump-basiert (hot backup)"
+    log "Database backup type: pg_dump-based (hot backup)"
 else
-    print_error "Keine gültigen Hauptdatenbank-Backups gefunden (weder Volume noch Dump)."
+    print_error "No valid main database backups found (neither volume nor dump)."
 fi
 
-# MinIO-Backup-Typ
+# MinIO backup type
 if [ -d "${BACKUP_DIR}/minio_volumes/data1" ]; then
     MINIO_BACKUP_TYPE="volume"
-    log "MinIO-Backup-Typ: Volume-basiert (full)"
+    log "MinIO backup type: Volume-based (full)"
 elif [ -d "${BACKUP_DIR}/minio_project_files" ] || [ -d "${BACKUP_DIR}/minio_storage" ]; then
     MINIO_BACKUP_TYPE="mirror"
-    log "MinIO-Backup-Typ: Mirror-basiert (incremental)"
+    log "MinIO backup type: Mirror-based (incremental)"
 else
-    print_error "Keine MinIO-Daten im Backup gefunden (weder Volume noch Mirror)."
+    print_error "No MinIO data found in backup (neither volume nor mirror)."
 fi
 
-# Checksum-Validierung
+# Checksum validation
 if [ -f "${BACKUP_DIR}/checksums.sha256" ]; then
-    log "Validiere Checksums..."
-    # Wichtig: sha256sum muss im Backup-Verzeichnis ausgeführt werden
+    log "Validating checksums..."
+    # Important: sha256sum must be executed in the backup directory
     if (cd "${BACKUP_DIR}" && sha256sum -c checksums.sha256 > /dev/null 2>&1); then
-        log "✓ Checksums erfolgreich validiert"
+        log "✓ Checksums successfully validated"
     else
         echo ""
-        log "WARNUNG: Checksum-Validierung fehlgeschlagen! (Detail-Fehler im Log)"
-        read -r -p "Trotzdem fortfahren? (ja/nein) " RESPONSE
-        [[ "$RESPONSE" != "ja" ]] && print_error "Restore wegen fehlerhafter Checksum abgebrochen."
+        log "WARNING: Checksum validation failed! (Details in log)"
+        read -r -p "Continue anyway? (yes/no) " RESPONSE
+        [[ "$RESPONSE" != "yes" ]] && print_error "Restore aborted due to failed checksum."
     fi
 else
-    log "WARNUNG: Keine Checksums gefunden - Integrität kann nicht geprüft werden."
+    log "WARNING: No checksums found - integrity cannot be verified."
 fi
 
 # =============================================================================
-# DIENSTE HERUNTERFAHREN
+# SHUTDOWN SERVICES
 # =============================================================================
-print_step "SCHRITT 7: Services herunterfahren"
-log "Fahre alle QFieldCloud-Dienste herunter..."
-# Verwende -v um Volumes zu entfernen, die wir überschreiben wollen (nur wenn sie nicht in use sind)
+print_step "STEP 7: Shutting down services"
+log "Shutting down all QFieldCloud services..."
+# Use -v to remove volumes we want to overwrite (only if not in use)
 docker compose down || true 2>&1 | tee -a "$RESTORE_LOG"
 sleep 3
-log "✓ Dienste gestoppt"
+log "✓ Services stopped"
 
 # =============================================================================
-# MINIO-WIEDERHERSTELLUNG
+# MINIO RESTORATION
 # =============================================================================
-print_step "SCHRITT 8: MinIO-Daten wiederherstellen"
-log "=== MinIO-Wiederherstellung ==="
+print_step "STEP 8: Restoring MinIO data"
+log "=== MinIO Restoration ==="
 
-# Die Volume-Namen werden von docker compose automatisch erzeugt
-# WICHTIG: Die Compose-Files müssen die Volumes definieren!
+# Volume names are automatically created by docker compose
+# IMPORTANT: The Compose files must define the volumes!
 if [ "$MINIO_BACKUP_TYPE" = "volume" ]; then
-    # VOLUME-BASIERTE WIEDERHERSTELLUNG
-    log "Stelle MinIO-Volumes wieder her (volume-basiert)..."
+    # VOLUME-BASED RESTORATION
+    log "Restoring MinIO volumes (volume-based)..."
     
     for i in 1 2 3 4; do
         VOLUME_NAME="${COMPOSE_PROJECT_NAME}_minio_data${i}"
         SOURCE_DIR="${BACKUP_DIR}/minio_volumes/data${i}"
         
         if [ ! -d "$SOURCE_DIR" ]; then
-            log "WARNUNG: Überspringe data${i} (nicht im Backup: $SOURCE_DIR)"
+            log "WARNING: Skipping data${i} (not in backup: $SOURCE_DIR)"
             continue
         fi
         
-        log "  -> Volume ${VOLUME_NAME} wiederherstellen..."
+        log "  -> Restoring volume ${VOLUME_NAME}..."
         
-        # Sicherer Volume-Restore mit alpine-Container
+        # Safe volume restore with alpine container
         if ! docker run --rm \
             -v "${SOURCE_DIR}:/source_data:ro" \
             -v "${VOLUME_NAME}:/target_data" \
             alpine:latest \
             sh -c '
-                # Lösche alte Daten (alle Dateien inklusive versteckte)
+                # Delete old data (all files including hidden)
                 rm -rf /target_data/* /target_data/.[!.]* 2>/dev/null || true
-                # Kopiere neue Daten
+                # Copy new data
                 cp -a /source_data/. /target_data/
                 if [ ! "$(ls -A /target_data)" ]; then
-                    echo "ERROR: Ziel-Volume ist leer nach Kopie"
+                    echo "ERROR: Target volume is empty after copy"
                     exit 1
                 fi
             '; then
-            print_error "MinIO Volume ${i} Wiederherstellung fehlgeschlagen"
+            print_error "MinIO volume ${i} restoration failed"
         fi
-        log "  -> Volume ${i} wiederhergestellt"
+        log "  -> Volume ${i} restored"
     done
     
 else
-    # MIRROR-BASIERTE WIEDERHERSTELLUNG
-    log "Stelle MinIO-Daten wieder her (mirror-basiert via mc)..."
-    log "Starte MinIO temporär für die Wiederherstellung..."
+    # MIRROR-BASED RESTORATION
+    log "Restoring MinIO data (mirror-based via mc)..."
+    log "Starting MinIO temporarily for restoration..."
     
-    # MinIO starten, um mc darauf zugreifen zu lassen
+    # Start MinIO to allow mc access
     if ! docker compose up -d minio 2>&1 | tee -a "$RESTORE_LOG"; then
-        print_error "MinIO konnte nicht gestartet werden für Mirror-Restore"
+        print_error "MinIO could not be started for mirror restore"
     fi
     
-    # Warte auf MinIO
+    # Wait for MinIO
     until docker compose exec minio curl -sf http://localhost:${MINIO_INTERNAL_PORT}/minio/health/live > /dev/null 2>&1; do
-        log "  -> Warte auf MinIO ($MINIO_INTERNAL_PORT)..."
+        log "  -> Waiting for MinIO ($MINIO_INTERNAL_PORT)..."
         sleep 2
     done
     
     MINIO_HOST="minio:${MINIO_INTERNAL_PORT}"
     MINIO_ALIAS="qfieldcloudminio"
     
-    # Nutze mc zum Spiegeln der Daten
+    # Use mc to mirror the data
     if ! docker run --rm \
         --network "${COMPOSE_PROJECT_NAME}_default" \
         -v "${BACKUP_DIR}:/backup:ro" \
@@ -415,22 +445,22 @@ else
             mc mirror --overwrite --remove /backup/minio_project_files ${MINIO_ALIAS}/qfieldcloud-project-files && \
             mc mirror --overwrite --remove /backup/minio_storage ${MINIO_ALIAS}/qfieldcloud-storage
         " 2>&1 | tee -a "$RESTORE_LOG" | grep -v "WARNING"; then
-        print_error "MinIO Mirror-Wiederherstellung fehlgeschlagen (mc error)"
+        print_error "MinIO mirror restoration failed (mc error)"
     fi
     
-    log "Stoppe MinIO nach Mirror-Restore..."
+    log "Stopping MinIO after mirror restore..."
     docker compose stop minio 2>&1 | tee -a "$RESTORE_LOG"
 fi
 
-log "MinIO-Wiederherstellung abgeschlossen"
+log "MinIO restoration completed"
 
 # =============================================================================
-# DATENBANK-WIEDERHERSTELLUNG
+# DATABASE RESTORATION
 # =============================================================================
-print_step "SCHRITT 9: Datenbanken wiederherstellen"
-log "=== Datenbank-Wiederherstellung ==="
+print_step "STEP 9: Restoring databases"
+log "=== Database Restoration ==="
 
-# Funktion: Datenbank-Restore mit pg_dump/pg_restore (nur für Dump-basierte Backups)
+# Function: Database restore with pg_dump/pg_restore (only for dump-based backups)
 restore_database() {
     local SERVICE_NAME=$1
     local USER=$2
@@ -438,86 +468,86 @@ restore_database() {
     local DUMP_FILE=$4
     
     if [ ! -f "$DUMP_FILE" ]; then
-        log "WARNUNG: Dump-Datei fehlt für $DB_NAME ($DUMP_FILE). Überspringe."
+        log "WARNING: Dump file missing for $DB_NAME ($DUMP_FILE). Skipping."
         return 0
     fi
     
-    log "Stelle Datenbank ${DB_NAME} aus Dump wieder her..."
+    log "Restoring database ${DB_NAME} from dump..."
     
-    # Lösche/Erstelle Datenbank neu
-    log "  -> Lösche alte Datenbank..."
+    # Drop/Create database fresh
+    log "  -> Dropping old database..."
     docker compose exec -T "$SERVICE_NAME" dropdb -U "$USER" "$DB_NAME" --if-exists 2>/dev/null || true
-    log "  -> Erstelle neue Datenbank..."
+    log "  -> Creating new database..."
     if ! docker compose exec -T "$SERVICE_NAME" createdb -U "$USER" "$DB_NAME"; then
-        log "FEHLER: Datenbank-Erstellung fehlgeschlagen: $DB_NAME"
+        log "ERROR: Database creation failed: $DB_NAME"
         return 1
     fi
     
-    # Restore über STDIN
-    log "  -> Importiere Daten..."
+    # Restore via STDIN
+    log "  -> Importing data..."
     if ! cat "$DUMP_FILE" | docker compose exec -i "$SERVICE_NAME" pg_restore -U "$USER" -d "$DB_NAME" --no-owner --no-acl 2>&1 | tee -a "$RESTORE_LOG" | grep -v "WARNING"; then
-         log "WARNUNG: Einige Restore-Warnings aufgetreten (meist harmlos, siehe Log)"
+         log "WARNING: Some restore warnings occurred (usually harmless, see log)"
     fi
     
-    # Validiere Restore
+    # Validate restore
     TABLE_COUNT=$(docker compose exec -T "$SERVICE_NAME" psql -U "$USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'" 2>/dev/null | tr -d ' ')
     
-    if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 5 ]; then # Mindestanzahl Tabellen prüfen
-        log "FEHLER: Datenbank ${DB_NAME} scheint leer oder unvollständig zu sein (${TABLE_COUNT} Tabellen)"
+    if [ -z "$TABLE_COUNT" ] || [ "$TABLE_COUNT" -lt 5 ]; then # Check minimum table count
+        log "ERROR: Database ${DB_NAME} appears empty or incomplete (${TABLE_COUNT} tables)"
         return 1
     fi
     
-    log "  -> Datenbank ${DB_NAME} erfolgreich wiederhergestellt (${TABLE_COUNT} Tabellen)"
+    log "  -> Database ${DB_NAME} successfully restored (${TABLE_COUNT} tables)"
     return 0
 }
 
-# Starte benötigte DB-Services (immer, da Volume-Restore/Dump-Restore sie braucht)
-log "Starte/prüfe Datenbankdienste..."
+# Start required DB services (always, as volume restore/dump restore needs them)
+log "Starting/checking database services..."
 if [ "$PROCESS_GEODB" = true ]; then
-    docker compose up -d db geodb 2>&1 | tee -a "$RESTORE_LOG" || print_error "DB-Dienste konnten nicht gestartet werden."
+    docker compose up -d db geodb 2>&1 | tee -a "$RESTORE_LOG" || print_error "DB services could not be started."
 else
-    docker compose up -d db 2>&1 | tee -a "$RESTORE_LOG" || print_error "Haupt-DB-Dienst konnte nicht gestartet werden."
+    docker compose up -d db 2>&1 | tee -a "$RESTORE_LOG" || print_error "Main DB service could not be started."
 fi
 
-# Warte auf Datenbanken mit Timeout
+# Wait for databases with timeout
 TIMEOUT=120
 ELAPSED=0
 
-# Warte-Funktion
+# Wait function
 wait_for_db() {
     local SERVICE_NAME=$1
     local USER=$2
     local DB_TITLE=$3
     
-    log "Warte auf ${DB_TITLE} ($SERVICE_NAME)..."
+    log "Waiting for ${DB_TITLE} ($SERVICE_NAME)..."
     ELAPSED=0
     while ! docker compose exec -T "$SERVICE_NAME" pg_isready -U "$USER" > /dev/null 2>&1; do
         if [ $ELAPSED -ge $TIMEOUT ]; then
-            print_error "${DB_TITLE}-Timeout nach ${TIMEOUT}s. Überprüfen Sie die Logs!"
+            print_error "${DB_TITLE} timeout after ${TIMEOUT}s. Check the logs!"
         fi
         sleep 2
         ELAPSED=$((ELAPSED + 2))
     done
-    log "✓ ${DB_TITLE} ist bereit"
+    log "✓ ${DB_TITLE} is ready"
 }
 
-wait_for_db "db" "$POSTGRES_USER" "Hauptdatenbank"
-[ "$PROCESS_GEODB" = true ] && wait_for_db "geodb" "$GEODB_USER" "Geo-Datenbank"
+wait_for_db "db" "$POSTGRES_USER" "Main database"
+[ "$PROCESS_GEODB" = true ] && wait_for_db "geodb" "$GEODB_USER" "Geo database"
 
 
 if [ "$DB_BACKUP_TYPE" = "volume" ]; then
-    # VOLUME-BASIERTE WIEDERHERSTELLUNG (von Cold Backup)
-    log "Stelle DB-Volumes wieder her (Volume-Overwrite)..."
+    # VOLUME-BASED RESTORATION (from cold backup)
+    log "Restoring DB volumes (volume overwrite)..."
     
-    # PostgreSQL Volume
+    # PostgreSQL volume
     DB_VOLUME="${COMPOSE_PROJECT_NAME}_postgres_data"
     SOURCE_DIR="${BACKUP_DIR}/db_volumes/postgres_data"
     
     if [ -d "$SOURCE_DIR" ]; then
-        log "  -> Stoppe Haupt-DB für Volume-Restore..."
+        log "  -> Stopping main DB for volume restore..."
         docker compose stop db 2>&1 | tee -a "$RESTORE_LOG"
         
-        log "  -> Stelle PostgreSQL Volume wieder her..."
+        log "  -> Restoring PostgreSQL volume..."
         if ! docker run --rm \
             -v "${SOURCE_DIR}:/source_data:ro" \
             -v "${DB_VOLUME}:/target_data" \
@@ -525,28 +555,28 @@ if [ "$DB_BACKUP_TYPE" = "volume" ]; then
             sh -c '
                 rm -rf /target_data/* /target_data/.[!.]* 2>/dev/null || true
                 cp -a /source_data/. /target_data/
-                if [ ! "$(ls -A /target_data)" ]; then echo "ERROR: Ziel-Volume ist leer"; exit 1; fi
+                if [ ! "$(ls -A /target_data)" ]; then echo "ERROR: Target volume is empty"; exit 1; fi
             '; then
-            print_error "PostgreSQL Volume-Wiederherstellung fehlgeschlagen"
+            print_error "PostgreSQL volume restoration failed"
         fi
         
-        log "  -> Starte Haupt-DB neu..."
+        log "  -> Restarting main DB..."
         docker compose start db 2>&1 | tee -a "$RESTORE_LOG"
-        wait_for_db "db" "$POSTGRES_USER" "Hauptdatenbank (Neustart)"
+        wait_for_db "db" "$POSTGRES_USER" "Main database (restart)"
     else
-        log "WARNUNG: PostgreSQL Volume nicht im Backup gefunden - überspringe."
+        log "WARNING: PostgreSQL volume not found in backup - skipping."
     fi
     
-    # GeoDB Volume (nur wenn aktiviert)
+    # GeoDB volume (only if enabled)
     if [ "$PROCESS_GEODB" = true ]; then
         GEODB_VOLUME="${COMPOSE_PROJECT_NAME}_geodb_data"
         SOURCE_DIR="${BACKUP_DIR}/db_volumes/geodb_data"
         
         if [ -d "$SOURCE_DIR" ]; then
-            log "  -> Stoppe GeoDB für Volume-Restore..."
+            log "  -> Stopping GeoDB for volume restore..."
             docker compose stop geodb 2>&1 | tee -a "$RESTORE_LOG"
             
-            log "  -> Stelle GeoDB Volume wieder her..."
+            log "  -> Restoring GeoDB volume..."
             if ! docker run --rm \
                 -v "${SOURCE_DIR}:/source_data:ro" \
                 -v "${GEODB_VOLUME}:/target_data" \
@@ -554,102 +584,102 @@ if [ "$DB_BACKUP_TYPE" = "volume" ]; then
                 sh -c '
                     rm -rf /target_data/* /target_data/.[!.]* 2>/dev/null || true
                     cp -a /source_data/. /target_data/
-                    if [ ! "$(ls -A /target_data)" ]; then echo "ERROR: Ziel-Volume ist leer"; exit 1; fi
+                    if [ ! "$(ls -A /target_data)" ]; then echo "ERROR: Target volume is empty"; exit 1; fi
                 '; then
-                print_error "GeoDB Volume-Wiederherstellung fehlgeschlagen"
+                print_error "GeoDB volume restoration failed"
             fi
             
-            log "  -> Starte GeoDB neu..."
+            log "  -> Restarting GeoDB..."
             docker compose start geodb 2>&1 | tee -a "$RESTORE_LOG"
-            wait_for_db "geodb" "$GEODB_USER" "Geo-Datenbank (Neustart)"
+            wait_for_db "geodb" "$GEODB_USER" "Geo database (restart)"
         else
-            log "WARNUNG: GeoDB Volume nicht im Backup gefunden - überspringe."
+            log "WARNING: GeoDB volume not found in backup - skipping."
         fi
     fi
     
 else
-    # DUMP-BASIERTE WIEDERHERSTELLUNG (von Hot Backup)
-    log "Führe pg_restore aus (Dump-basiert)..."
+    # DUMP-BASED RESTORATION (from hot backup)
+    log "Performing pg_restore (dump-based)..."
     
-    # Hauptdatenbank wiederherstellen
+    # Restore main database
     if ! restore_database "db" "$POSTGRES_USER" "$POSTGRES_DB" "${BACKUP_DIR}/db_dump.sqlc"; then
-        print_error "Hauptdatenbank-Wiederherstellung aus Dump fehlgeschlagen"
+        print_error "Main database restoration from dump failed"
     fi
     
-    # Geo-Datenbank wiederherstellen (nur wenn aktiviert)
+    # Restore geo database (only if enabled)
     if [ "$PROCESS_GEODB" = true ]; then
         if ! restore_database "geodb" "$GEODB_USER" "$GEODB_DB" "${BACKUP_DIR}/geodb_dump.sqlc"; then
-            print_error "Geo-Datenbank-Wiederherstellung aus Dump fehlgeschlagen"
+            print_error "Geo database restoration from dump failed"
         fi
     fi
 fi
 
-log "Datenbank-Wiederherstellung abgeschlossen"
+log "Database restoration completed"
 
 # =============================================================================
-# ALLE DIENSTE STARTEN
+# START ALL SERVICES
 # =============================================================================
-print_step "SCHRITT 10: Alle Services starten"
-log "Starte alle QFieldCloud-Dienste..."
+print_step "STEP 10: Starting all services"
+log "Starting all QFieldCloud services..."
 if ! docker compose up -d 2>&1 | tee -a "$RESTORE_LOG"; then
-    log "FEHLER: Konnte nicht alle Dienste starten. Prüfen Sie Logs!"
+    log "ERROR: Could not start all services. Check logs!"
 fi
 
-# Finaler Health-Check
-log "Führe finalen Health-Check durch..."
+# Final health check
+log "Performing final health check..."
 sleep 5
 
 HEALTHY=true
 
-# DB Check
-docker compose exec -T db pg_isready -U "${POSTGRES_USER}" > /dev/null 2>&1 || { log "WARNUNG: Hauptdatenbank antwortet nicht"; HEALTHY=false; }
-[ "$PROCESS_GEODB" = true ] && docker compose exec -T geodb pg_isready -U "${GEODB_USER}" > /dev/null 2>&1 || { log "WARNUNG: Geo-Datenbank antwortet nicht"; HEALTHY=false; }
+# DB check
+docker compose exec -T db pg_isready -U "${POSTGRES_USER}" > /dev/null 2>&1 || { log "WARNING: Main database not responding"; HEALTHY=false; }
+[ "$PROCESS_GEODB" = true ] && docker compose exec -T geodb pg_isready -U "${GEODB_USER}" > /dev/null 2>&1 || { log "WARNING: Geo database not responding"; HEALTHY=false; }
 
-# MinIO Check
-docker compose exec minio curl -sf http://localhost:${MINIO_INTERNAL_PORT}/minio/health/live > /dev/null 2>&1 || { log "WARNUNG: MinIO antwortet nicht"; HEALTHY=false; }
+# MinIO check
+docker compose exec minio curl -sf http://localhost:${MINIO_INTERNAL_PORT}/minio/health/live > /dev/null 2>&1 || { log "WARNING: MinIO not responding"; HEALTHY=false; }
 
 # =============================================================================
-# ABSCHLUSS & CLEANUP
+# COMPLETION & CLEANUP
 # =============================================================================
-print_header "RESTORE ABGESCHLOSSEN"
+print_header "RESTORE COMPLETED"
 
-# Cleanup temporäres Backup-Verzeichnis
+# Cleanup temporary backup directory
 if [ -n "$TEMP_BACKUP_DIR" ] && [ -d "$TEMP_BACKUP_DIR" ]; then
-    log "Räume temporäres Backup-Verzeichnis auf: $TEMP_BACKUP_DIR"
+    log "Cleaning up temporary backup directory: $TEMP_BACKUP_DIR"
     rm -rf "$TEMP_BACKUP_DIR"
-    log "✓ Temporäre Dateien gelöscht"
+    log "✓ Temporary files deleted"
 fi
 
 log ""
-log "=== Wiederherstellung abgeschlossen ==="
-log "Restore-Log: $RESTORE_LOG"
+log "=== Restoration completed ==="
+log "Restore log: $RESTORE_LOG"
 
 if [ "$HEALTHY" = true ]; then
-    log "✅ ALLE DIENSTE SIND ERFOLGREICH GESTARTET UND ANTWORTEN KORREKT."
+    log "✅ ALL SERVICES SUCCESSFULLY STARTED AND RESPONDING CORRECTLY."
 else
-    log "⚠️ WARNUNG: Einige Dienste antworten nicht korrekt. Prüfen Sie die Logs!"
+    log "⚠️ WARNING: Some services not responding correctly. Check the logs!"
 fi
 
 echo ""
 echo "=============================================================================="
-echo "NÄCHSTE SCHRITTE"
+echo "NEXT STEPS"
 echo "=============================================================================="
 echo ""
-echo "1. Überprüfen Sie die Services:"
+echo "1. Check the services:"
 echo "   ▶ docker compose ps"
 echo ""
-echo "2. Prüfen Sie die Logs auf Fehler:"
+echo "2. Check logs for errors:"
 echo "   ▶ docker compose logs -f"
 echo ""
-echo "3. **Wichtig:** Führen Sie **Django-Datenbank-Migrationen** aus, falls Sie auf eine neuere Code-Version upgegradet haben:"
-echo "   ▶ docker compose exec server python manage.py migrate"
+echo "3. **Important:** Run **Django database migrations** if you upgraded to a newer code version:"
+echo "   ▶ docker compose exec app python manage.py migrate"
 echo ""
-echo "4. Testen Sie die Anwendung gründlich:"
-echo "   - Webinterface erreichbar?"
-echo "   - Login und Datenzugriff funktioniert?"
+echo "4. Thoroughly test the application:"
+echo "   - Web interface accessible?"
+echo "   - Login and data access working?"
 echo ""
 
-echo "Restore-Log gespeichert in: $RESTORE_LOG"
+echo "Restore log saved in: $RESTORE_LOG"
 echo "=============================================================================="
 echo ""
 
